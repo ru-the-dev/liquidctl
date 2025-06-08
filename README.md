@@ -174,6 +174,7 @@ Device notes are sorted alphabetically, major (upper case) notes before minor
 <sup>_p_</sup> _Only partially supported._<br>
 <sup>_x_</sup> _Only supported on Linux._<br>
 
+
 ## Installation
 [Installation]: #installation
 
