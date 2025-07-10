@@ -46,10 +46,10 @@ class LianLiUni(UsbHidDriver):
 
     _MATCHES = [
         (0x0CF2, 0x7750, "Lian Li Uni SL", {"device_type": "SL"}),
-        (0x0CF2, 0xA100,"Lian Li Uni SL", {"device_type": "SL"}),
-        (0x0CF2,0xA101,"Lian Li Uni AL",{"device_type": "AL"}),
-        (0x0CF2,0xA102,"Lian Li Uni SL-Infinity",{"device_type": "SLI"}),
-        (0x0CF2,0xA103,"Lian Li Uni SL V2",{"device_type": "SLV2"}),
+        (0x0CF2, 0xA100, "Lian Li Uni SL", {"device_type": "SL"}),
+        (0x0CF2, 0xA101, "Lian Li Uni AL", {"device_type": "AL"}),
+        (0x0CF2, 0xA102, "Lian Li Uni SL-Infinity", {"device_type": "SLI"}),
+        (0x0CF2, 0xA103, "Lian Li Uni SL V2", {"device_type": "SLV2"}),
         (0x0CF2, 0xA104, "Lian Li Uni AL V2", {"device_type": "ALV2"}),
         (0x0CF2, 0xA105, "Lian Li Uni SL V2", {"device_type": "SLV2"}),
     ]
@@ -141,6 +141,37 @@ class LianLiUni(UsbHidDriver):
         except Exception as e:
             _LOGGER.warning("Error writing to device: %s", e)
 
+    def _calculate_speed_byte(self, speed):
+        """Calculate the speed byte based on the device type and desired speed.
+
+        Parameters:
+            speed: int or float - The desired speed percentage (0-100)
+
+        Returns:
+            int - The calculated speed byte to send to the device
+        """
+
+        if speed > 100:
+            speed = 100
+            
+        if self.device_type in ["SL", "AL"]:
+            # Formula: (800 + (11 * speed)) / 19
+            if speed == 0:
+                return 40  # Keep your zero-speed override
+            else:
+                speed_byte = int((800 + (11 * speed)) / 19) & 0xFF
+        elif self.device_type in ["SLV2", "ALV2", "SLI"]:
+            # Formula: (250 + (17.5 * speed)) / 20
+            if speed == 0:
+                return 7  # Keep your zero-speed override
+            else:
+                speed_byte = int((250 + (17.5 * speed)) / 20) & 0xFF
+        else:
+            raise NotSupportedByDevice(
+                f"Unsupported device type: {self.device_type}"
+            )
+        return speed_byte
+
     def set_fixed_speed(self, channel, duty, **kwargs):
         """Set a fixed speed for the specified channel.
 
@@ -158,62 +189,35 @@ class LianLiUni(UsbHidDriver):
                 f"channel must be between {_MIN_CHANNEL} and {_MAX_CHANNEL} (zero-based index)"
             )
 
-        # Check if PWM is on for the channel
+        # Ensure PWM is disabled for manual speed control
         if self.pwm_channels[channel_index]:
-            _LOGGER.warning(
-                f"Cannot set fixed speed for Channel {channel_index + 1}: PWM is enabled. "
-                "Please disable PWM first to set a fixed speed."
-            )
-            return
+            _LOGGER.info(f"Disabling PWM sync for Channel {channel_index + 1} to set fixed speed")
+            self.toggle_pwm_sync(channel_index, desired_state=False)
+            time.sleep(0.3)  # Give more time for PWM disable
 
         duty = clamp(duty, 0, 100)
+        
         speed_byte = self._calculate_speed_byte(duty)
         command = [224, channel_index + 32, 0, speed_byte]
+        
         _LOGGER.debug(
-            "Setting fixed speed for channel %d: duty %.1f%%, command %s",
+            "Setting fixed speed for channel %d: duty %.1f%%, speed_byte %d, command %s",
             channel_index,
             duty,
+            speed_byte,
             command,
         )
+        
         try:
             self.device.write(command)
+            time.sleep(0.1)  # delay to prevent race conditions
+            
         except Exception as e:
             _LOGGER.error("Error writing to device: %s", e)
-        time.sleep(0.1)  # Delay to prevent race conditions
+            return
 
         self.channel_speeds[channel_index] = duty
-
         _LOGGER.info(f"Fan speed for Channel {channel_index + 1} set to {duty}%")
-
-    def _calculate_speed_byte(self, speed):
-        """Calculate the speed byte based on the device type and desired speed.
-
-        Parameters:
-            speed: int or float - The desired speed percentage (0-100)
-
-        Returns:
-            int - The calculated speed byte to send to the device
-        """
-        if self.device_type in ["SL", "AL"]:
-            if speed == 0:
-                return 40
-            else:
-                speed_byte = int((800 + (11 * speed)) / 19) & 0xFF
-        elif self.device_type == "SLI":
-            if speed == 0:
-                return 10
-            else:
-                speed_byte = int((250 + (17.5 * speed)) / 20) & 0xFF
-        elif self.device_type in ["SLV2", "ALV2"]:
-            if speed == 0:
-                return 7
-            else:
-                speed_byte = int((200 + (19 * speed)) / 21) & 0xFF
-        else:
-            raise NotSupportedByDevice(
-                f"Unsupported device type: {self.device_type}"
-            )
-        return speed_byte
 
     def _extract_channel_index(self, channel):
         """Extract the channel index from the channel name.
@@ -237,3 +241,53 @@ class LianLiUni(UsbHidDriver):
         """Disconnect from the device."""
         _LOGGER.info("Disconnecting from device")
         self.device.close()
+
+    def set_speed_profile(self, channel, profile, **kwargs):
+        """Set a speed profile for the specified channel.
+        
+        Parameters:
+            channel: str or int - The channel name or zero-based index
+            profile: list of tuples - (temperature, speed) pairs
+        """
+        if isinstance(channel, str):
+            channel_index = self._extract_channel_index(channel)
+        else:
+            channel_index = channel
+
+        if not _MIN_CHANNEL <= channel_index <= _MAX_CHANNEL:
+            raise ValueError(
+                f"channel must be between {_MIN_CHANNEL} and {_MAX_CHANNEL} (zero-based index)"
+            )
+
+        # For now, just set to the maximum speed from the profile
+        # This is a simplified implementation
+        max_speed = max(speed for _, speed in profile)
+        self.set_fixed_speed(channel_index, max_speed)
+
+    def set_color(self, channel, mode, colors, **kwargs):
+        """Set RGB lighting for the specified channel.
+        
+        Note: This is a placeholder implementation.
+        Actual RGB commands would need to be reverse-engineered.
+        """
+        _LOGGER.warning("RGB lighting control not yet implemented")
+        return
+
+    def get_hw_info(self):
+        """Get hardware information from the device."""
+        try:
+            # This is a placeholder - actual firmware reading would need
+            # the correct USB HID commands
+            return [
+                ("Device", self.description, ""),
+                ("Device Type", self.device_type, ""),
+                ("Channels", f"{_MAX_CHANNEL + 1}", ""),
+                ("Firmware version", "Unknown", ""),
+            ]
+        except Exception as e:
+            _LOGGER.warning("Could not read hardware info: %s", e)
+            return [
+                ("Device", self.description, ""),
+                ("Device Type", self.device_type, ""),
+                ("Channels", f"{_MAX_CHANNEL + 1}", ""),
+            ]
